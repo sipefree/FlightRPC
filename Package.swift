@@ -6,21 +6,31 @@ import PackageDescription
 let package = Package(
     name: "FlightRPC",
     products: [
-        // Products define the executables and libraries produced by a package, and make them visible to other packages.
         .library(
             name: "FlightRPC",
             targets: ["FlightRPC"]),
+        .executable(
+            name: "flightrpc-gen",
+            targets: ["flightrpc-gen"])
     ],
     dependencies: [
-        // Dependencies declare other packages that this package depends on.
-        // .package(url: /* package url */, from: "1.0.0"),
+        .package(url: "https://github.com/apple/swift-argument-parser.git", from: "0.0.1"),
+        .package(url: "https://github.com/JohnSundell/ShellOut.git", from: "2.3.0"),
+        .package(url: "https://github.com/mxcl/Path.swift.git", from: "1.0.1"),
+        .package(url: "https://github.com/vapor/console-kit.git", .branch("4.0.0-rc.1")),
     ],
     targets: [
-        // Targets are the basic building blocks of a package. A target can define a module or a test suite.
-        // Targets can depend on other targets in this package, and on products in packages which this package depends on.
         .target(
             name: "FlightRPC",
             dependencies: []),
+        .target(
+            name: "flightrpc-gen",
+            dependencies: [
+                .product(name: "ArgumentParser", package: "swift-argument-parser"),
+                .product(name: "Path", package: "Path.swift"),
+                .product(name: "ShellOut", package: "ShellOut"),
+                .product(name: "ConsoleKit", package: "console-kit"),
+            ]),
         .testTarget(
             name: "FlightRPCTests",
             dependencies: ["FlightRPC"]),

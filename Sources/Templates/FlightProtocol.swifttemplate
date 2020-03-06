@@ -1,0 +1,37 @@
+<%
+import Foundation
+func suiteName(_ proto: Type) -> String? {
+    guard let alias = proto.typealiases["Suite"] else { return nil }
+    return alias.typeName.description
+}
+func canUseProtocol(_ proto: Type) -> Bool {
+    proto.inheritedTypes.contains("FlightProtocol") && suiteName(proto) != nil
+}
+func eligibleProtocols() -> [Type] {
+    types.protocols.filter { canUseProtocol($0) }
+}
+func structName(_ method: SourceryRuntime.Method) -> String {
+    let name = method.name
+    var charSet = CharacterSet.alphanumerics
+    charSet.insert(charactersIn: "_")
+    return name.components(separatedBy: charSet.inverted).joined()
+}
+-%>
+
+<% for proto in eligibleProtocols() { -%>
+extension <%= suiteName(proto)! %> {
+    <% for method in proto.methods { -%>
+    struct <%= structName(method) %>: Codable {
+    
+    }
+    <% } -%>
+}
+<% } -%>
+
+Protocols:
+<% for type in types.protocols where canUseProtocol(type) { -%>
+    <%= type.name %> : <%= type.debugDescription %>
+    <%_ for contained in type.containedTypes { _%>
+        <%_ %>    <% contained.name %>
+    <%_ } _%>
+<%_ } _%>
