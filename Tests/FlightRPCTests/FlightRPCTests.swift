@@ -18,7 +18,7 @@ protocol ServerProtocol: FlightProtocol {
     )
     
 }
-CharacterSet.alphanumerics
+
 
 protocol ClientProtocol: FlightProtocol {
     
