@@ -8,26 +8,42 @@
 import Combine
 import Foundation
 import Network
+import os
 
 public enum Flight {
     
     public class Connection {
         
-        public init(
+        public convenience init(
             to endpoint: NWEndpoint,
             using parameters: NWParameters
         ) {
-            connection = NWConnection(to: endpoint, using: parameters)
+            self.init(connection: NWConnection(to: endpoint, using: parameters), name: "Default")
+        }
+        
+        public init(connection: NWConnection?, name: String) {
+            let log = OSLog(subsystem: "Flight", category: name)
+            self.log = log
+            
+            self.connection = connection
+            self.name = name
+            let endpoint = connection?.endpoint
+            
+            struct LogOut: TextOutputStream {
+                let log: OSLog
+                mutating func write(_ string: String) { os_log("%@", log: log, string) }
+            }
+            let logOut = LogOut(log: log)
             
             encodingQueue = DispatchQueue(
-                label: "FlightRPC-Encoding-\(endpoint.hashValue)",
+                label: "FlightRPC-Encoding-\(name)",
                 qos: .userInitiated,
                 attributes: [],
                 autoreleaseFrequency: .workItem
             )
             
             decodingQueue = DispatchQueue(
-                label: "FlightRPC-Decoding-\(endpoint.hashValue)",
+                label: "FlightRPC-Decoding-\(name)",
                 qos: .userInitiated,
                 attributes: [],
                 autoreleaseFrequency: .workItem
@@ -37,21 +53,32 @@ public enum Flight {
                 .receive(on: decodingQueue)
                 .flatMap { (data: Data) in data.publisher }
                 .collectMessageData()
+                .handleEvents(receiveOutput: { data in
+                    os_log("    <IN Data: %@>", log: log, String(data: data, encoding: .utf8)!)
+                })
+
                 .decode(type: IncomingMessage.self, decoder: decoder)
                 .handleEvents(receiveCompletion: { error in
-                    Swift.print("Decoding Error: \(error)")
+                    os_log("Decoding error: %@", log: log, String(describing: error))
                 })
                 .retry(Int.max)
                 .assertNoFailure()
-                .multicast { PassthroughSubject<IncomingMessage, Never>() }
+                .handleEvents(receiveOutput: { msg in
+                    os_log("  [IN Msg: %@]", log: log, String(describing: msg))
+                })
+                //.print("    <Incoming Msgs>", to: logOut)
+                .share()
                 .eraseToAnyPublisher()
-            
+                
             outgoingDataPublisher = outgoingMessageSubject
                 .receive(on: encodingQueue)
+                .handleEvents(receiveOutput: { msg in
+                    os_log("  [OUT Msg: %@]", log: log, String(describing: msg))
+                })
                 .encode(encoder: encoder)
                 .eraseToAnyPublisher()
                 .handleEvents(receiveCompletion: { error in
-                    Swift.print("Encoding Error: \(error)")
+                    os_log("Encoding error: %@", log: log, String(describing: error))
                 })
                 .retry(Int.max)
                 .assertNoFailure()
@@ -60,18 +87,28 @@ public enum Flight {
                     data.append(UInt8(0))
                     return data
                 }
+                .handleEvents(receiveOutput: { data in
+                    os_log("    <OUT Data: %@>", log: log, String(data: data, encoding: .utf8)!)
+                })
+                //.print("    <Outgoing Data>", to: logOut)
+                .share()
                 .eraseToAnyPublisher()
+            
         }
         
-        private let connection: NWConnection
+        private var name: String
+        
+        private var log: OSLog
+        
+        private var connection: NWConnection?
         
         private let encodingQueue: DispatchQueue
         private let decodingQueue: DispatchQueue
         
         private let outgoingMessageSubject = PassthroughSubject<OutgoingMessage, Never>()
-        private let outgoingDataPublisher: AnyPublisher<Data, Never>
+        let outgoingDataPublisher: AnyPublisher<Data, Never>
         
-        private let incomingDataSubject = PassthroughSubject<Data, Never>()
+        let incomingDataSubject = PassthroughSubject<Data, Never>()
         private let incomingMessagePublisher: AnyPublisher<IncomingMessage, Never>
         
         private let decoder: JSONDecoder = {
@@ -93,8 +130,6 @@ public enum Flight {
         
         private var singleCancellables = [UUID: AnyCancellable]()
         
-        public typealias ResponseFuture = Future<OutgoingMessage.ArgumentEncodeBlock, Never>
-        public typealias ResponsePromise = ResponseFuture.Promise
         public typealias ResponseFulfiller = (@escaping OutgoingMessage.ArgumentEncodeBlock) -> Void
         public typealias IncomingHandler = (inout UnkeyedDecodingContainer, ResponseFulfiller?) throws -> Void
         
@@ -104,6 +139,8 @@ public enum Flight {
             named name: String,
             with handler: @escaping IncomingHandler
         ) -> AnyCancellable {
+            os_log("Subscribe Incoming: %@", log: self.log, name)
+            
             return incomingMessagePublisher
                 .compactMap { (msg: IncomingMessage) -> IncomingMethodCall? in
                     guard
@@ -116,38 +153,31 @@ public enum Flight {
                 .sink { [weak self] (call: IncomingMethodCall) in
                     guard let self = self else { return }
                     
+                    os_log("Dispatch Incoming: %@ (%@)", log: self.log, name, call.msg.id.uuidString)
+                    
+                    var responseFulfiller: ResponseFulfiller? = nil
+                    
                     if call.expectResp {
-                        let future = ResponseFuture { (promise: @escaping ResponsePromise) in
-                            do {
-                                var container = call.msg.container
-                                try handler(&container) { respEncoder in
-                                    promise(.success(respEncoder))
-                                }
-                            } catch {
-                                // todo: error?
-                            }
-                        }
+                        os_log("  Expecting Response: %@", log: self.log, call.msg.id.uuidString)
                         
-                        let cancellable = future
-                            .sink { [weak self] ArgumentEncodeBlock in
-                                let responseMsg = OutgoingMessage(
-                                    kind: .response(call.msg.id),
-                                    encodeArguments: ArgumentEncodeBlock
-                                )
+                        responseFulfiller = { [weak self] argEncodeBlock in
+                            guard let self = self else { return }
                             
-                                self?.outgoingMessageSubject.send(responseMsg)
-                                self?.singleCancellables[call.msg.id] = nil
-                            }
+                            let responseMsg = OutgoingMessage(
+                                kind: .response(call.msg.id),
+                                encodeArguments: argEncodeBlock
+                            )
                         
-                        self.singleCancellables[call.msg.id] = cancellable
-                        
-                    } else {
-                        do {
-                            var container = call.msg.container
-                            try handler(&container, nil)
-                        } catch {
-                            // todo: error?
+                            os_log("    Sending Response: %@", log: self.log, call.msg.id.uuidString)
+                            self.outgoingMessageSubject.send(responseMsg)
                         }
+                    }
+                    
+                    do {
+                        var container = call.msg.container
+                        try handler(&container, responseFulfiller)
+                    } catch {
+                        // todo: error?
                     }
                 }
         }
@@ -157,36 +187,42 @@ public enum Flight {
             with encoder: @escaping OutgoingMessage.ArgumentEncodeBlock,
             response handler: IncomingMessage.ArgumentDecodeBlock? = nil
         ) {
-            let msg = OutgoingMessage(
+            let outMsg = OutgoingMessage(
                 kind: .methodCall(name, expectResponse: handler != nil),
                 encodeArguments: encoder
             )
             
+            let outMsgID = outMsg.id
+            
+            os_log("Sending %@: %@", log: self.log, name, outMsgID.uuidString)
+            
             if let respHandler = handler {
+                os_log("  Expect Response %@", log: self.log, outMsgID.uuidString)
                 
                 let cancellable = incomingMessagePublisher
-                    .filter { (msg: IncomingMessage) -> Bool in
+                    .filter { (incMsg: IncomingMessage) -> Bool in
                         guard
-                            case .response(let respID) = msg.kind,
-                            respID == msg.id
+                            case .response(let respID) = incMsg.kind,
+                            respID == outMsgID
                         else { return false }
+                        os_log("    Found Response: %@ (%@)", log: self.log, outMsgID.uuidString, incMsg.id.uuidString)
                         return true
                     }
-                    .sink { [weak self] (msg: IncomingMessage) in
-                        var container = msg.container
+                    .sink { [weak self] (incMsg: IncomingMessage) in
+                        var container = incMsg.container
                         do {
                             try respHandler(&container)
                         } catch {
                             // todo: error?
                         }
                         
-                        self?.singleCancellables[msg.id] = nil
+                        self?.singleCancellables[outMsgID] = nil
                     }
                 
-                singleCancellables[msg.id] = cancellable
+                singleCancellables[outMsgID] = cancellable
             }
             
-            outgoingMessageSubject.send(msg)
+            outgoingMessageSubject.send(outMsg)
         }
         
 
@@ -283,17 +319,16 @@ public enum Flight {
     
     open class RemoteProxy {
         
-        public init(
+        public convenience init(
             at endpoint: NWEndpoint,
             using parameters: NWParameters
         ) {
-            connection = Connection(
-                to: endpoint,
-                using: parameters
-            )
-            
+            self.init(connection: NWConnection(to: endpoint, using: parameters))
+        }
+        
+        public init(connection: NWConnection?) {
+            self.connection = Connection(connection: connection, name: String(describing: type(of: self)))
             registerIncomingMethods(cancellables: &cancellables)
-            
             //connection.resume()
         }
         
@@ -307,9 +342,18 @@ public enum Flight {
         
     }
     
-    public enum MessageKind {
+    public enum MessageKind: CustomStringConvertible {
         case methodCall(String, expectResponse: Bool)
         case response(UUID)
+        
+        public var description: String {
+            switch self {
+            case .methodCall(let method, let expectResponse):
+                return "call: '\(method)' " + (expectResponse ? "(resp)" : "(no-resp)")
+            case .response(let uuid):
+                return "resp: \(uuid)"
+            }
+        }
         
         fileprivate static let kMethod = 0
         fileprivate static let kResponse = 1
@@ -356,7 +400,7 @@ public enum Flight {
         }
     }
     
-    public struct OutgoingMessage: Encodable {
+    public struct OutgoingMessage: Encodable, CustomStringConvertible {
         
         public typealias ArgumentEncodeBlock = (inout UnkeyedEncodingContainer) throws -> Void
         
@@ -379,9 +423,13 @@ public enum Flight {
             try encodeArguments(&container)
         }
         
+        public var description: String {
+            "OutgoingMessage(\(id), \(kind), args: \(argumentSummary(encodeArguments) ?? "<err>"))"
+        }
+        
     }
     
-    public struct IncomingMessage: Decodable {
+    public struct IncomingMessage: Decodable, CustomStringConvertible {
         
         public typealias ArgumentDecodeBlock = (inout UnkeyedDecodingContainer) throws -> Void
         
@@ -398,6 +446,14 @@ public enum Flight {
         
         public let container: UnkeyedDecodingContainer
         
+        public var description: String {
+            var args = 0
+            if let count = container.count {
+                args = count - container.currentIndex
+            }
+            return "IncomingMessage(\(id), \(kind), args: \(args))"
+        }
+        
     }
     
     
@@ -410,6 +466,7 @@ public enum Flight {
     public enum FlightError: Error, LocalizedError {
         
     }
+    
     
     fileprivate struct MessageCollector<Upstream: Publisher>:
         Publisher
@@ -466,6 +523,7 @@ public enum Flight {
                 
                 private mutating func sendBuffer(_ buffer: Data, to downstream: Downstream) {
                     let demand = downstream.receive(buffer)
+                    os_log("DEMAND5: %@ <%@>", String(describing: demand), String(data: buffer, encoding: .utf8)!)
                     self = .collecting(demand, makeBuffer())
                 }
                 
@@ -549,6 +607,24 @@ public enum Flight {
         
     }
     
+    fileprivate static func argumentSummary(
+        _ encodeBlock: @escaping OutgoingMessage.ArgumentEncodeBlock
+    ) -> String? {
+        struct Container: Encodable {
+            let block: OutgoingMessage.ArgumentEncodeBlock
+            func encode(to encoder: Encoder) throws {
+                var c = encoder.unkeyedContainer()
+                try block(&c)
+            }
+        }
+        
+        guard
+            let data = try? JSONEncoder().encode(Container(block: encodeBlock)),
+            let str = String(data: data, encoding: .utf8)
+        else { return nil }
+        
+        return str
+    }
 }
 
 extension Publisher where Output == UInt8 {
