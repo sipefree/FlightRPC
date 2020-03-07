@@ -19,7 +19,22 @@ public enum Flight {
         ) {
             connection = NWConnection(to: endpoint, using: parameters)
             
+            encodingQueue = DispatchQueue(
+                label: "FlightRPC-Encoding-\(endpoint.hashValue)",
+                qos: .userInitiated,
+                attributes: [],
+                autoreleaseFrequency: .workItem
+            )
+            
+            decodingQueue = DispatchQueue(
+                label: "FlightRPC-Decoding-\(endpoint.hashValue)",
+                qos: .userInitiated,
+                attributes: [],
+                autoreleaseFrequency: .workItem
+            )
+            
             incomingMessagePublisher = incomingDataSubject
+                .receive(on: decodingQueue)
                 .flatMap { (data: Data) in data.publisher }
                 .collectMessageData()
                 .decode(type: IncomingMessage.self, decoder: decoder)
@@ -32,6 +47,7 @@ public enum Flight {
                 .eraseToAnyPublisher()
             
             outgoingDataPublisher = outgoingMessageSubject
+                .receive(on: encodingQueue)
                 .encode(encoder: encoder)
                 .eraseToAnyPublisher()
                 .handleEvents(receiveCompletion: { error in
@@ -48,6 +64,9 @@ public enum Flight {
         }
         
         private let connection: NWConnection
+        
+        private let encodingQueue: DispatchQueue
+        private let decodingQueue: DispatchQueue
         
         private let outgoingMessageSubject = PassthroughSubject<OutgoingMessage, Never>()
         private let outgoingDataPublisher: AnyPublisher<Data, Never>
@@ -72,9 +91,12 @@ public enum Flight {
         
         private var cancellables = Set<AnyCancellable>()
         
-        public typealias ResponseFuture = Future<OutgoingMessage.ArgumentEncoder, Never>
+        private var singleCancellables = [UUID: AnyCancellable]()
+        
+        public typealias ResponseFuture = Future<OutgoingMessage.ArgumentEncodeBlock, Never>
         public typealias ResponsePromise = ResponseFuture.Promise
-        public typealias IncomingHandler = (inout UnkeyedDecodingContainer, ResponsePromise?) -> Void
+        public typealias ResponseFulfiller = (@escaping OutgoingMessage.ArgumentEncodeBlock) -> Void
+        public typealias IncomingHandler = (inout UnkeyedDecodingContainer, ResponseFulfiller?) throws -> Void
         
         private typealias IncomingMethodCall = (name: String, expectResp: Bool, msg: IncomingMessage)
         
@@ -95,30 +117,45 @@ public enum Flight {
                     guard let self = self else { return }
                     
                     if call.expectResp {
-                        ResponseFuture { promise in
-                            var container = call.msg.container
-                            handler(&container, promise)
+                        let future = ResponseFuture { (promise: @escaping ResponsePromise) in
+                            do {
+                                var container = call.msg.container
+                                try handler(&container) { respEncoder in
+                                    promise(.success(respEncoder))
+                                }
+                            } catch {
+                                // todo: error?
+                            }
                         }
-                        .sink { [weak self] (argumentEncoder: @escaping OutgoingMessage.ArgumentEncoder) in
-                            let responseMsg = OutgoingMessage(
-                                kind: .response(call.msg.id),
-                                encodeArguments: argumentEncoder
-                            )
+                        
+                        let cancellable = future
+                            .sink { [weak self] ArgumentEncodeBlock in
+                                let responseMsg = OutgoingMessage(
+                                    kind: .response(call.msg.id),
+                                    encodeArguments: ArgumentEncodeBlock
+                                )
                             
-                            self?.outgoingMessageSubject.send(responseMsg)
-                        }
-                        .store(in: &self.cancellables)
+                                self?.outgoingMessageSubject.send(responseMsg)
+                                self?.singleCancellables[call.msg.id] = nil
+                            }
+                        
+                        self.singleCancellables[call.msg.id] = cancellable
+                        
                     } else {
-                        var container = call.msg.container
-                        handler(&container, nil)
+                        do {
+                            var container = call.msg.container
+                            try handler(&container, nil)
+                        } catch {
+                            // todo: error?
+                        }
                     }
                 }
         }
         
         public func sendOutgoingCall(
             named name: String,
-            with encoder: @escaping OutgoingMessage.ArgumentEncoder,
-            response handler: @escaping IncomingMessage.ArgumentDecoder?
+            with encoder: @escaping OutgoingMessage.ArgumentEncodeBlock,
+            response handler: IncomingMessage.ArgumentDecodeBlock? = nil
         ) {
             let msg = OutgoingMessage(
                 kind: .methodCall(name, expectResponse: handler != nil),
@@ -126,17 +163,33 @@ public enum Flight {
             )
             
             if let respHandler = handler {
-                incomingMessagePublisher
+                
+                let cancellable = incomingMessagePublisher
                     .filter { (msg: IncomingMessage) -> Bool in
                         guard
                             case .response(let respID) = msg.kind,
-                            respUUID == msg.id
+                            respID == msg.id
                         else { return false }
                         return true
                     }
-                    
+                    .sink { [weak self] (msg: IncomingMessage) in
+                        var container = msg.container
+                        do {
+                            try respHandler(&container)
+                        } catch {
+                            // todo: error?
+                        }
+                        
+                        self?.singleCancellables[msg.id] = nil
+                    }
+                
+                singleCancellables[msg.id] = cancellable
             }
+            
+            outgoingMessageSubject.send(msg)
         }
+        
+
         
         
 //        private enum State {
@@ -228,6 +281,32 @@ public enum Flight {
 
     }
     
+    open class RemoteProxy {
+        
+        public init(
+            at endpoint: NWEndpoint,
+            using parameters: NWParameters
+        ) {
+            connection = Connection(
+                to: endpoint,
+                using: parameters
+            )
+            
+            registerIncomingMethods(cancellables: &cancellables)
+            
+            //connection.resume()
+        }
+        
+        public let connection: Connection
+        
+        private var cancellables = Set<AnyCancellable>()
+        
+        open func registerIncomingMethods(cancellables: inout Set<AnyCancellable>) {
+            fatalError("Subclasses must override this method.")
+        }
+        
+    }
+    
     public enum MessageKind {
         case methodCall(String, expectResponse: Bool)
         case response(UUID)
@@ -279,9 +358,9 @@ public enum Flight {
     
     public struct OutgoingMessage: Encodable {
         
-        public typealias ArgumentEncoder = (inout UnkeyedEncodingContainer) throws -> Void
+        public typealias ArgumentEncodeBlock = (inout UnkeyedEncodingContainer) throws -> Void
         
-        public init(id: UUID = UUID(), kind: MessageKind, encodeArguments: @escaping ArgumentEncoder) {
+        public init(id: UUID = UUID(), kind: MessageKind, encodeArguments: @escaping ArgumentEncodeBlock) {
             self.id = id
             self.kind = kind
             self.encodeArguments = encodeArguments
@@ -291,7 +370,7 @@ public enum Flight {
         
         public let kind: MessageKind
         
-        private let encodeArguments: ArgumentEncoder
+        private let encodeArguments: ArgumentEncodeBlock
         
         public func encode(to encoder: Encoder) throws {
             var container = encoder.unkeyedContainer()
@@ -304,7 +383,7 @@ public enum Flight {
     
     public struct IncomingMessage: Decodable {
         
-        public typealias ArgumentDecoder = (inout UnkeyedDecodingContainer) throws -> Void
+        public typealias ArgumentDecodeBlock = (inout UnkeyedDecodingContainer) throws -> Void
         
         public init(from decoder: Decoder) throws {
             var container = try decoder.unkeyedContainer()
