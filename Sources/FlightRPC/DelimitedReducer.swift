@@ -8,6 +8,40 @@
 import Foundation
 import Combine
 
+extension Publisher {
+    
+    public func delimitedReduce<Result>(
+        into initialResult: @escaping @autoclosure () -> Result,
+        isDelimiter: @escaping (Self.Output) -> Bool,
+        updateResult: @escaping (inout Result, Self.Output) -> Void,
+        waitForFirstDelimiter: Bool = false
+    ) -> Publishers.DelimitedReducer<Self, Result> {
+        .init(
+            upstream: self,
+            initialResult: initialResult,
+            isDelimiter: isDelimiter,
+            updateResult: updateResult,
+            waitForFirstDelimiter: waitForFirstDelimiter
+        )
+    }
+    
+    public func delimitedReduce<Result>(
+        _ initialResult: @escaping @autoclosure () -> Result,
+        isDelimiter: @escaping (Self.Output) -> Bool,
+        nextResult: @escaping (Result, Self.Output) -> Result,
+        waitForFirstDelimiter: Bool = false
+    ) -> Publishers.DelimitedReducer<Self, Result> {
+        .init(
+            upstream: self,
+            initialResult: initialResult,
+            isDelimiter: isDelimiter,
+            nextResult: nextResult,
+            waitForFirstDelimiter: waitForFirstDelimiter
+        )
+    }
+    
+}
+
 extension Publishers {
     
     public struct DelimitedReducer<Upstream: Publisher, Output>: Publisher {
@@ -18,54 +52,59 @@ extension Publishers {
         
         public init(
             upstream: Upstream,
-            initalResult: @escaping () -> Output,
+            initialResult: @escaping () -> Output,
             isDelimiter: @escaping (Input) -> Bool,
             updateResult: @escaping (inout Output, Input) -> Void,
-            waitForFirstEnd: Bool = false
+            waitForFirstDelimiter: Bool = false
         ) {
             self.upstream = upstream
-            self.makeInitialResult = initalResult
+            self.initialResult = initialResult
             self.isDelimiter = isDelimiter
             self.updateResult = updateResult
-            self.waitForFirstEnd = waitForFirstEnd
+            self.waitForFirstDelimiter = waitForFirstDelimiter
         }
         
         public init(
             upstream: Upstream,
-            initalResult: @escaping () -> Output,
+            initialResult: @escaping () -> Output,
             isDelimiter: @escaping (Input) -> Bool,
             nextResult: @escaping (Output, Input) -> Output,
-            waitForFirstEnd: Bool = false
+            waitForFirstDelimiter: Bool = false
         ) {
             self.init(
                 upstream: upstream,
-                initalResult: initialResult,
+                initialResult: initialResult,
                 isDelimiter: isDelimiter,
-                updateResult: { (output, input) -> Bool in
-                    guard let next = nextResult(output, input) else { return false }
-                    output = next
+                updateResult: { (output, input) in
+                    output = nextResult(output, input)
                 },
-                waitForFirstEnd: waitForFirstEnd
+                waitForFirstDelimiter: waitForFirstDelimiter
             )
         }
         
         private let upstream: Upstream
         
-        private let makeInitialResult: () -> Output
+        private let initialResult: () -> Output
         
         private let isDelimiter: (Input) -> Bool
         
-        private let updateResult: (inout Output, Input) -> Bool
+        private let updateResult: (inout Output, Input) -> Void
         
-        private let waitForFirstEnd: Bool
+        private let waitForFirstDelimiter: Bool
         
-        func receive<S>(subscriber: S)
+        public func receive<S>(subscriber: S)
         where
             S : Subscriber,
             Self.Failure == S.Failure,
             Self.Output == S.Input
         {
-            let inner = Inner(downstream: subscriber)
+            let inner = Inner(
+                downstream: subscriber,
+                initialResult: initialResult,
+                isDelimiter: isDelimiter,
+                updateResult: updateResult,
+                waitForFirstDelimiter: waitForFirstDelimiter
+            )
             upstream.subscribe(inner)
             subscriber.receive(subscription: inner)
         }
@@ -77,15 +116,18 @@ extension Publishers {
             Downstream.Input == Output,
             Downstream.Failure == Upstream.Failure
         {
+            
             typealias Input = Upstream.Output
             typealias Failure = Upstream.Failure
             typealias Demand = Subscribers.Demand
             
-            private let makeInitialResult: () -> Output
+            private let downstream: Downstream
+            
+            private let initialResult: () -> Output
             
             private let isDelimiter: (Input) -> Bool
             
-            private let updateResult: (inout Output, Input) -> Bool
+            private let updateResult: (inout Output, Input) -> Void
             
             private var state: State
             
@@ -95,21 +137,20 @@ extension Publishers {
             
             init(
                 downstream: Downstream,
-                initalResult: @escaping () -> Output,
+                initialResult: @escaping () -> Output,
                 isDelimiter: @escaping (Input) -> Bool,
-                updateResult: @escaping (inout Output, Input) -> Bool,
-                waitForFirstEnd: Bool
+                updateResult: @escaping (inout Output, Input) -> Void,
+                waitForFirstDelimiter: Bool
             ) {
                 self.downstream = downstream
-                self.makeInitialResult = initialResult
+                self.initialResult = initialResult
                 self.isDelimiter = isDelimiter
                 self.updateResult = updateResult
-                self.output = initialResult()
                 
-                if waitForFirstEnd {
+                if waitForFirstDelimiter {
                     self.state = .awaitingFirstEnd
                 } else {
-                    self.state = .collecting
+                    self.state = .collecting(initialResult())
                 }
             }
             
@@ -117,41 +158,68 @@ extension Publishers {
                 case awaitingFirstEnd
                 case collecting(Output)
                 case fullOutput(Output)
-                
-                var upstreamDemand: Demand {
-                    if case .fullOutput = self {
-                        return .max(0)
-                    } else {
-                        return .unlimited
-                    }
-                }
             }
             
             private func sendOutput(_ output: Output) {
                 let demand = downstream.receive(output)
-                remainingDemand += (demand - 1)
-                state = .collecting(makeInitialResult())
+                if remainingDemand < .unlimited {
+                    remainingDemand += (demand - 1)
+                }
+                state = .collecting(initialResult())
             }
             
             func receive(subscription: Subscription) {
                 self.subscription = subscription
-                subscription.request(state.upstreamDemand)
+                subscription.request(.unlimited)
             }
             
             func receive(_ input: Input) -> Demand {
-                switch (isDelimiter(input), state) {
-                case (true, .awaitingFirstEnd):
-                    state = .collecting
+                switch (isDelimiter(input), remainingDemand, state) {
+                    
+                case (true, _, .awaitingFirstEnd):
+                    state = .collecting(initialResult())
+                    
+                case (true, .none, .collecting(let output)):
+                    state = .fullOutput(output)
+                    subscription?.request(.max(0))
+                    
+                case (true, _, .collecting(let output)):
+                    sendOutput(output)
+                    
+                case (false, _, .collecting(var output)):
+                    updateResult(&output, input)
+                    state = .collecting(output)
+                    
+                case (_, _, .fullOutput), (false, _, .awaitingFirstEnd):
+                    break
                     
                 }
                 
-                return state.upstreamDemand
+                return .max(0)
+            }
+             
+            func receive(completion: Subscribers.Completion<Upstream.Failure>) {
+                downstream.receive(completion: completion)
             }
             
+            func request(_ demand: Subscribers.Demand) {
+                remainingDemand = demand
+                
+                if remainingDemand > .max(0), case .fullOutput(let output) = state {
+                    subscription?.request(.unlimited)
+                    sendOutput(output)
+                }
+            }
             
+            func cancel() {
+                subscription?.cancel()
+                subscription = nil
+            }
             
         }
     }
         
     
 }
+
+

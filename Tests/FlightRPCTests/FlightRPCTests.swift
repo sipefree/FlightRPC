@@ -53,7 +53,7 @@ extension TestProtocols {
         private weak var local: (AnyObject&ClientProtocol)?
         
         override func registerIncomingMethods(cancellables: inout Set<AnyCancellable>) {
-            connection.handleIncomingCalls(
+            channel.handleIncomingCalls(
                 named: "clientMethodA(bing:bang:completion:)"
             ) { [weak self] (dec, fulfill) in
                 
@@ -69,7 +69,7 @@ extension TestProtocols {
                 
             }.store(in: &cancellables)
             
-            connection.handleIncomingCalls(
+            channel.handleIncomingCalls(
                 named: "clientMethodB(boom:)"
             ) { [weak self] (dec, promise) in
                 
@@ -82,7 +82,7 @@ extension TestProtocols {
         
         func serverMethodA(foo: String, bar: Int, completion: @escaping (Int) -> Void) {
             
-            connection.sendOutgoingCall(
+            channel.sendOutgoingCall(
                 named: "serverMethodA(foo:bar:completion:)",
                 with: { enc in
                     try enc.encode(foo)
@@ -97,7 +97,7 @@ extension TestProtocols {
         
         func serverMethodB(baz: Int) {
             
-            connection.sendOutgoingCall(
+            channel.sendOutgoingCall(
                 named: "serverMethodB(baz:)",
                 with: { enc in
                     try enc.encode(baz)
@@ -118,7 +118,7 @@ extension TestProtocols {
         private weak var local: (AnyObject&ServerProtocol)?
         
         override func registerIncomingMethods(cancellables: inout Set<AnyCancellable>) {
-            connection.handleIncomingCalls(
+            channel.handleIncomingCalls(
                 named: "serverMethodA(foo:bar:completion:)"
             ) { [weak self] (dec, fulfill) in
                 
@@ -134,7 +134,7 @@ extension TestProtocols {
                 
             }.store(in: &cancellables)
             
-            connection.handleIncomingCalls(
+            channel.handleIncomingCalls(
                 named: "serverMethodB(baz:)"
             ) { [weak self] (dec, promise) in
                 
@@ -147,7 +147,7 @@ extension TestProtocols {
         
         func clientMethodA(bing: Int, bang: String, completion: @escaping (Float) -> Void) {
             
-            connection.sendOutgoingCall(
+            channel.sendOutgoingCall(
                 named: "clientMethodA(bing:bang:completion:)",
                 with: { enc in
                     try enc.encode(bing)
@@ -162,7 +162,7 @@ extension TestProtocols {
         
         func clientMethodB(boom: Double) {
             
-            connection.sendOutgoingCall(
+            channel.sendOutgoingCall(
                 named: "clientMethodB(boom:)",
                 with: { enc in
                     try enc.encode(boom)
@@ -227,27 +227,43 @@ final class FlightRPCTests: XCTestCase {
     
     var cancellables = Set<AnyCancellable>()
     
-    var clientImpl: TestClientImpl!
-    var serverImpl: TestServerImpl!
+    var clientImpl: TestClientImpl! = nil
+    var serverImpl: TestServerImpl! = nil
     
-    var clientProxy: TestProtocols.ClientProtocolProxy!
-    var serverProxy: TestProtocols.ServerProtocolProxy!
+    var clientProxy: TestProtocols.ClientProtocolProxy! = nil
+    var serverProxy: TestProtocols.ServerProtocolProxy! = nil
+    
+    var expectations: [XCTestExpectation] {
+        [
+            clientImpl.methodAExpectation,
+            clientImpl.methodBExpectation,
+            serverImpl.methodAExpectation,
+            serverImpl.methodBExpectation,
+            clientAResponseExpectation,
+            serverAResponseExpectation
+        ]
+    }
+    
+    var clientAResponseExpectation: XCTestExpectation! = nil
+    var serverAResponseExpectation: XCTestExpectation! = nil
+    
+    override func setUp() {
+        clientImpl = TestClientImpl()
+        serverImpl = TestServerImpl()
+        
+        clientAResponseExpectation = XCTestExpectation(description: "Client responds to clientMethodA.")
+        serverAResponseExpectation = XCTestExpectation(description: "Server responds to serverMethodA.")
+    }
     
     func testDataFlow() {
-        let clientImpl = TestClientImpl()
-        let serverImpl = TestServerImpl()
+        clientProxy = TestProtocols.ClientProtocolProxy(connection: nil, exporting: serverImpl)
+        serverProxy = TestProtocols.ServerProtocolProxy(connection: nil, exporting: clientImpl)
         
-        let clientProxy = TestProtocols.ClientProtocolProxy(connection: nil, exporting: serverImpl)
-        let serverProxy = TestProtocols.ServerProtocolProxy(connection: nil, exporting: clientImpl)
+        let dataToClient = clientProxy.channel.outgoingDataPublisher
+        let dataToServer = serverProxy.channel.outgoingDataPublisher
         
-        let dataToClient = clientProxy.connection.outgoingDataPublisher
-        let dataToServer = serverProxy.connection.outgoingDataPublisher
-        
-        let dataFromClient = clientProxy.connection.incomingDataSubject
-        let dataFromServer = serverProxy.connection.incomingDataSubject
-        
-        let clientAResponseExpectation = XCTestExpectation(description: "Client responds to clientMethodA.")
-        let serverAResponseExpectation = XCTestExpectation(description: "Server responds to serverMethodA.")
+        let dataFromClient = clientProxy.channel.incomingDataSubject
+        let dataFromServer = serverProxy.channel.incomingDataSubject
         
         func setupDataFlow(
             from outPublisher: AnyPublisher<Data, Never>,
@@ -278,35 +294,21 @@ final class FlightRPCTests: XCTestCase {
         setupDataFlow(from: dataToClient, to: dataFromServer).store(in: &cancellables)
         setupDataFlow(from: dataToServer, to: dataFromClient).store(in: &cancellables)
         
-//        clientProxy.clientMethodA(bing: 1, bang: "Test Bang") { (resp) in
-//            os_log("->TEST clientMethodA resp: %.2f", log: log, resp)
-//            clientAResponseExpectation.fulfill()
-//        }
+        clientProxy.clientMethodA(bing: 1, bang: "Test Bang") { (resp) in
+            os_log("->TEST clientMethodA resp: %.2f", log: log, resp)
+            self.clientAResponseExpectation.fulfill()
+        }
         
-//        serverProxy.serverMethodB(baz: 5)
+        serverProxy.serverMethodB(baz: 5)
 
         serverProxy.serverMethodA(foo: "Test Foo", bar: 8982) { (resp) in
             os_log("->TEST serverMethodA resp: %ld", log: log, resp)
-            serverAResponseExpectation.fulfill()
+            self.serverAResponseExpectation.fulfill()
         }
 
         clientProxy.clientMethodB(boom: 189.6)
         
-        self.clientImpl = clientImpl
-        self.clientProxy = clientProxy
-        self.serverImpl = serverImpl
-        self.serverProxy = serverProxy
-        
-        let expectations = [
-//            clientImpl.methodAExpectation,
-            clientImpl.methodBExpectation,
-            serverImpl.methodAExpectation,
-//            serverImpl.methodBExpectation,
-//            clientAResponseExpectation,
-            serverAResponseExpectation
-        ]
-        
-        wait(for: expectations, timeout: 10000000)
+        wait(for: expectations, timeout: 2)
     }
 
     static var allTests = [
