@@ -194,7 +194,6 @@ class TestClientImpl: ClientProtocol {
     
     func clientMethodA(bing: Int, bang: String, completion: @escaping (Float) -> Void) {
         //os_log("->CLIENT clientMethodA(bing: %ld, bang: %@)", log: log, bing, bang)
-        print()
         DispatchQueue.main.async {
             let resp: Float = 42.2
             //os_log("<-CLIENT (response) clientMethodA: %.1f", log: log, resp)
@@ -546,39 +545,35 @@ final class FlightRPCTests: XCTestCase {
         
         let clientConnected = expectation(description: "Client connected.")
         
-        func runTests() {
-            clientProxy.clientMethodA(bing: 1, bang: "Test Bang") { (resp) in
-                //os_log("->TEST clientMethodA resp: %.2f", log: log, resp)
-                self.clientAResponseExpectation.fulfill()
-            }
-            
-            serverProxy.serverMethodB(baz: 5)
-
-            serverProxy.serverMethodA(foo: "Test Foo", bar: 8982) { (resp) in
-                //os_log("->TEST serverMethodA resp: %ld", log: log, resp)
-                self.serverAResponseExpectation.fulfill()
-            }
-
-            clientProxy.clientMethodB(boom: 189.6)
-        }
-        
-        try! TestProtocols.ClientProtocolProxy.listen(
-            exporting: serverImpl,
-            using: params
-        ) { (clientConn) in
-            clientConnected.fulfill()
-            
-            self.clientProxy = clientConn
-            
-            runTests()
-            
-        }.store(in: &cancellables)
-        
         serverProxy = TestProtocols.ServerProtocolProxy(
             endpoint: endpoint,
             parameters: params,
             exporting: clientImpl
         )
+        
+        serverProxy.serverMethodB(baz: 5)
+
+        serverProxy.serverMethodA(foo: "Test Foo", bar: 8982) { (resp) in
+            //os_log("->TEST serverMethodA resp: %ld", log: log, resp)
+            self.serverAResponseExpectation.fulfill()
+        }
+        
+        try! TestProtocols.ClientProtocolProxy.listen(
+            exporting: serverImpl,
+            using: params
+        ) { (clientProxy) in
+            clientConnected.fulfill()
+            
+            self.clientProxy = clientProxy
+            
+            clientProxy.clientMethodA(bing: 1, bang: "Test Bang") { (resp) in
+                //os_log("->TEST clientMethodA resp: %.2f", log: log, resp)
+                self.clientAResponseExpectation.fulfill()
+            }
+
+            clientProxy.clientMethodB(boom: 189.6)
+            
+        }.store(in: &cancellables)
         
         wait(for: expectations + [clientConnected], timeout: 2)
         

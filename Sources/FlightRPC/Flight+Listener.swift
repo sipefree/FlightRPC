@@ -8,6 +8,7 @@
 import Network
 import Combine
 import Foundation
+import os
 
 public protocol FlightListener: Flight.RemoteProxy {
     
@@ -47,13 +48,8 @@ extension FlightListener {
         atUnixSocketPath path: String,
         newConnection: @escaping (Self) -> Void
     ) throws -> AnyCancellable {
-        return try Flight.listen(
-            atUnixSocketPath: path,
-            name: String(describing: type(of: local))
-        ) { (connection) in
-            let proxy = Self.init(connection: connection, exporting: local)
-            newConnection(proxy)
-        }
+        let (_, parameters) = Flight.parametersForUnixSocket(at: path)
+        return try Self.listen(exporting: local, using: parameters, newConnection: newConnection)
     }
     
     public static func listen(
@@ -62,11 +58,15 @@ extension FlightListener {
         on port: NWEndpoint.Port = .any,
         newConnection: @escaping (Self) -> Void
     ) throws -> AnyCancellable {
+        let name = String(describing: type(of: local))
+        
         return try Flight.listen(
             using: parameters,
             on: port,
-            name: String(describing: type(of: local))
+            name: name
         ) { (connection) in
+            //os_log(.debug, log: Flight.listenerLog, "(%@) New Connection: 0x%x", name, Flight.logDesc(connection))
+            
             let proxy = Self.init(connection: connection, exporting: local)
             newConnection(proxy)
         }
@@ -81,16 +81,6 @@ extension Flight {
         parameters.defaultProtocolStack.transportProtocol = NWProtocolTCP.Options()
         parameters.requiredLocalEndpoint = endpoint
         return (endpoint, parameters)
-    }
-    
-    public static func listen(
-        atUnixSocketPath path: String,
-        name: String,
-        newConnection: @escaping (NWConnection) -> Void
-    ) throws -> AnyCancellable {
-        let (_, parameters) = parametersForUnixSocket(at: path)
-        
-        return try listen(using: parameters, name: name, newConnection: newConnection)
     }
     
     public static func listen(
@@ -120,7 +110,9 @@ extension Flight {
             listener = try NWListener(using: parameters, on: port)
             queue = DispatchQueue(label: "FlightRPC-Listener-\(name)")
             
-            listener.stateUpdateHandler = { newState in }
+            listener.stateUpdateHandler = { newState in
+                //os_log(.debug, log: Flight.listenerLog, "%@ (%@) State: %@", Flight.logDesc(self), name, String(describing: newState))
+            }
             listener.newConnectionHandler = newConnection
             listener.start(queue: queue)
         }
@@ -136,3 +128,5 @@ extension Flight {
     }
     
 }
+
+private var log: OSLog { Flight.listenerLog }
