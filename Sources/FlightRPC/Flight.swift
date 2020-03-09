@@ -15,268 +15,9 @@ import os
 /// A namespace for `FlightRPC` types and APIs.
 public enum Flight {
     
-    // MARK: - Connection Publisher/Subscriber
-    
-    /// A connctable publisher and subscriber wrapping a network connection.
-    public class Connection:
-        ConnectablePublisher,
-        Subscriber
-    {
-        
-        // MARK: - Typealiases
-        
-        /// The connection accepts raw data as input.
-        public typealias Input = Data
-        
-        /// The connection publishes raw data as output.
-        public typealias Output = Data
-        
-        /// The connection never completes with errors.
-        public typealias Failure = Never
-        
-        
-        // MARK: - Initialization
-        
-        /// Initializes the connection for a unix file socket.
-        public convenience init(
-            unixSocketPath: String,
-            name: String
-        ) {
-            self.init(to: .unix(path: unixSocketPath), using: .init(), name: name)
-        }
-        
-        /// Initializes the connection for a given network endpoint.
-        public convenience init(
-            to endpoint: NWEndpoint,
-            using params: NWParameters,
-            name: String
-        ) {
-            self.init(connection: NWConnection(to: endpoint, using: params), name: name)
-        }
-        
-        /// Initializes the connection with its network connection.
-        private init(connection: NWConnection, name: String) {
-            self.connection = connection
-            self.name = name
-            
-            self.queue = DispatchQueue(
-                label: "FlightRPC-Transport-\(name)",
-                qos: .userInitiated,
-                attributes: [],
-                autoreleaseFrequency: .workItem,
-                target: nil
-            )
-            
-            connection.stateUpdateHandler = { [weak self] state in
-                self?.connectionStateChanged(to: state)
-            }
-        }
-        
-        
-        // MARK: - Private API
-        
-        /// The underlying network connection.
-        private let connection: NWConnection
-        
-        /// The identifying name of the connection.
-        private let name: String
-        
-        /// The queue that processes network events.
-        private let queue: DispatchQueue
-        
-        /// Handles state changes for the underlying connection.
-        private func connectionStateChanged(to nwState: NWConnection.State) {
-            state.ready = nwState == .ready
-        }
-        
-        fileprivate func demandDidChange() {
-            var cumulativeDemand = Subscribers.Demand.max(0)
-            
-            for downstream in down {
-                let demand = downstream.pendingDemand
-                
-                guard demand != .unlimited else {
-                    cumulativeDemand = .unlimited
-                    break
-                }
-                
-                cumulativeDemand += demand
-            }
-            
-            guard cumulativeDemand != state.demand else { }
-            
-            state.demand = cumulativeDemand
-        }
-        
-        private func stopReceiving() {
-            up.forEach { $0.request(.none) }
-            state.receiving = false
-        }
-        
-        private func startReceiving() {
-            up.forEach { $0.request(.unlimited) }
-            state.receiving = true
-        }
-        
-        private var up = Set<UpstreamSubscription>()
-        private var down = Set<DownstreamSubcription>()
-        
-        private typealias State = (
-            enabled: Bool,
-            ready: Bool,
-            demand: Subscribers.Demand,
-            receiving: Bool
-        )
-        
-        private var state: State {
-            didSet {
-                
-                switch state {
-                    
-                case (enabled: false, ready: true, demand: _,     receiving: _),
-                     (enabled: true,  ready: true, demand: .none, receiving: _):
-                    connection.cancel()
-                    if state.receiving {
-                        stopReceiving()
-                    }
-                    
-                case (enabled: _, ready: false, demand: _, receiving: true):
-                    stopReceiving()
-                    
-                case (enabled: true, ready: true, demand: _, receiving: false):
-                    startReceiving()
-                    connection.start(queue: queue)
-                    
-                    
-                case (enabled: true, ready: true,  demand: _, receiving: true),
-                     (enabled: _,    ready: false, demand: _, receiving: false):
-                    break
-                }
-            }
-        }
-        
-        
-        // MARK: - <ConnectablePublisher>
-        
-        /// Connects the underlying network connection if there are
-        /// upstream or downstream publishers or subscribers.
-        public func connect() -> Cancellable {
-            state.enabled = true
-            return AnyCancellable { [weak self]
-                self?.state.enabled = false
-            }
-        }
-        
-        // MARK: - <Subscriber>
-        
-        public func receive(_ input: Data) -> Subscribers.Demand {
-            guard state.receiving else { return }
-            
-            var demandChanged: Bool = false
-            
-            for downstream in down where downstream.pendingDemand > .max(0) {
-                let demand = downstream.downstream.receive(input)
-                if demand != .unlimited {
-                    let updatedDemand = downstream.pendingDemand + (demand - 1)
-                    downstream.pendingDemand = updatedDemand
-                    demandChanged = true
-                }
-            }
-            
-            if demandChanged {
-                demandDidChange()
-            }
-            
-            return .max(0)
-        }
-        
-        public func receive(completion: Subscribers.Completion<Never>) {
-            
-        }
-        
-        
-        // MARK: - <Publisher>
-        
-        public func receive(subscription: Subscription) {
-            let upstream = UpstreamSubscription(subscription: subscription)
-            up.insert(upstream)
-            
-            switch state {
-            case (enabled: true, ready: true, demand: _, receiving: true):
-                upstream.request(.unlimited)
-                
-            default:
-                upstream.request(.none)
-            }
-        }
-        
-        public func receive<S>(subscriber: S)
-        where
-            S : Subscriber,
-            Failure == S.Failure,
-            Output == S.Input
-        {
-            let downstream = DownstreamSubcription(downstream: subscriber, parent: self)
-            self.down.insert(downstream)
-            subscriber.receive(subscription: downstream)
-        }
-        
-        private class UpstreamSubscription: Subscription, Cancellable {
-            
-            init(subscription: Subscription) {
-                self.subscription = subscription
-            }
-            
-            private let subscription: Subscription
-            
-            func request(_ demand: Subscribers.Demand) {
-                subscription.request(demand)
-            }
-            
-            func cancel() {
-                subscription.cancel()
-            }
-            
-        }
-        
-        private class DownstreamSubcription: Subscription, AnyCancellable {
-            
-            init<S>(downstream: S, parent: Connection)
-            where
-                S : Subscriber,
-                Self.Failure == S.Failure,
-                Self.Output == S.Input
-            {
-                self.downstream = AnySubscriber(downstream)
-                self.parent = parent
-            }
-            
-            let downstream: AnySubscriber<Data,Never>
-            
-            weak var parent: Connection?
-            
-            var pendingDemand: Subscribers.Demand = .max(0)
-            
-            func request(_ demand: Subscribers.Demand) {
-                pendingDemand = demand
-                parent?.demandDidChange()
-            }
-            
-        }
-        
-        
-    }
-    
     public class Channel {
         
-        public convenience init(
-            to endpoint: NWEndpoint,
-            using parameters: NWParameters
-        ) {
-            self.init(connection: NWConnection(to: endpoint, using: parameters), name: "Default")
-        }
-        
-        public init(connection: NWConnection?, name: String) {
+        public init(connection: Flight.Connection?, name: String) {
             let log = OSLog(subsystem: "FlightRPC", category: name)
             self.log = log
             
@@ -312,6 +53,7 @@ public enum Flight {
                 })
                 .retry(Int.max)
                 .assertNoFailure()
+                .print("\(name) Incoming Messages: ")
                 .share()
                 .eraseToAnyPublisher()
                 
@@ -328,8 +70,29 @@ public enum Flight {
                     data.append(UInt8(0))
                     return data
                 }
+                .merge(with: Just(Data([UInt8(0)])))
                 .share()
                 .eraseToAnyPublisher()
+            
+            
+            if let connection = connection {
+                outgoingDataPublisher
+                    .buffer(size: 128, prefetch: .keepFull, whenFull: .dropOldest)
+                    .print("\(name) Outgoing Buffer: ")
+                    .subscribe(connection)
+                
+                connection
+                    .handleEvents(receiveOutput: { data in
+                        let summary = String(data: data, encoding: .utf8) ?? data.description
+                        print("\(name) Incoming Buffer: '\(summary)'")
+                    })
+                    .sink { [weak self] data in
+                        self?.incomingDataSubject.send(data)
+                    }
+                    .store(in: &cancellables)
+                
+                
+            }
             
         }
         
@@ -337,7 +100,7 @@ public enum Flight {
         
         private var log: OSLog
         
-        private var connection: NWConnection?
+        private var connection: Flight.Connection?
         
         private let encodingQueue: DispatchQueue
         private let decodingQueue: DispatchQueue
@@ -372,6 +135,10 @@ public enum Flight {
         
         private typealias IncomingMethodCall = (name: String, expectResp: Bool, msg: IncomingMessage)
         
+        public func connect() {
+            connection?.connect().store(in: &cancellables)
+        }
+        
         public func handleIncomingCalls(
             named name: String,
             with handler: @escaping IncomingHandler
@@ -385,6 +152,7 @@ public enum Flight {
                     
                     return (methodName, expectResp, msg)
                 }
+                .print("<Dispatch: \(name)>")
                 .sink { [weak self] (call: IncomingMethodCall) in
                     guard let self = self else { return }
                     var responseFulfiller: ResponseFulfiller? = nil
@@ -463,9 +231,13 @@ public enum Flight {
         }
         
         public init(connection: NWConnection?) {
-            self.channel = Channel(connection: connection, name: String(describing: type(of: self)))
+            let name = String(describing: type(of: self))
+            
+            let flightConnection = connection.map { Flight.Connection(connection: $0, name: name) }
+            
+            channel = Channel(connection: flightConnection, name: name)
             registerIncomingMethods(cancellables: &cancellables)
-            //connection.resume()
+            channel.connect()
         }
         
         public let channel: Channel
