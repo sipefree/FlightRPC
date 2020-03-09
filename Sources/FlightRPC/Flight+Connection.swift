@@ -109,7 +109,7 @@ extension Flight {
         
         /// Handles state changes for the underlying connection.
         private func connectionStateChanged(to nwState: NWConnection.State) {
-            //os_log(.debug, log: Flight.connectionLog, "%@ (%@) Connection State: %@", Flight.logDesc(self), name, String(describing: nwState))
+            os_log(.debug, log: Flight.connectionLog, "%@ (%@) Connection State: %@", Flight.logDesc(self), name, String(describing: nwState))
             state.connectionReady = nwState == .ready
             
             if case .waiting = nwState {
@@ -266,24 +266,24 @@ extension Flight {
                 _state = newState
                 
                 if _state.shouldStartConnection {
-                    //os_log(.debug, log: Flight.connectionLog, "%@ (%@) Starting Connection", Flight.logDesc(self), name)
+                    os_log(.debug, log: Flight.connectionLog, "%@ (%@) Starting Connection", Flight.logDesc(self), name)
                     connection.start(queue: queue)
                 } else if _state.shouldCancelConnection {
-                    //os_log(.debug, log: Flight.connectionLog, "%@ (%@) Cancelling Connection", Flight.logDesc(self), name)
+                    os_log(.debug, log: Flight.connectionLog, "%@ (%@) Cancelling Connection", Flight.logDesc(self), name)
                     connection.cancel()
                 }
                 
                 if _state.shouldStartOutgoingDemand {
-                    //os_log(.debug, log: Flight.connectionLog, "%@ (%@) Accepting Outgoing Data", Flight.logDesc(self), name)
+                    os_log(.debug, log: Flight.connectionLog, "%@ (%@) Accepting Outgoing Data", Flight.logDesc(self), name)
                     _state.outgoingDemand = true
                     upstreamOutgoing?.request(.max(1))
                 } else if _state.shouldStopOutgoingDemand {
-                    //os_log(.debug, log: Flight.connectionLog, "%@ (%@) Stopping Outgoing Data", Flight.logDesc(self), name)
+                    os_log(.debug, log: Flight.connectionLog, "%@ (%@) Stopping Outgoing Data", Flight.logDesc(self), name)
                     _state.outgoingDemand = false
                 }
                 
                 if _state.shouldReceive {
-                    //os_log(.debug, log: Flight.connectionLog, "%@ (%@) Waiting to Receive Data...", Flight.logDesc(self), name)
+                    os_log(.debug, log: Flight.connectionLog, "%@ (%@) Waiting to Receive Data...", Flight.logDesc(self), name)
                     scheduleReceiveData()
                 }
             }
@@ -323,7 +323,7 @@ extension Flight {
         }
         
         public func receive(subscription: Subscription) {
-            //os_log(.debug, log: Flight.connectionLog, "%@ (%@) Attached Outgoing Data Publisher: %@", Flight.logDesc(self), name, String(describing: subscription))
+            os_log(.debug, log: Flight.connectionLog, "%@ (%@) Attached Outgoing Data Publisher: %@", Flight.logDesc(self), name, String(describing: subscription))
             
             let upstream = UpstreamSubscription(subscription: subscription)
             sync {
@@ -348,7 +348,7 @@ extension Flight {
             Failure == S.Failure,
             Output == S.Input
         {
-            //os_log(.debug, log: Flight.connectionLog, "%@ (%@) Attached Incoming Data Subscriber: %@", Flight.logDesc(self), name, String(describing: subscriber))
+            os_log(.debug, log: Flight.connectionLog, "%@ (%@) Attached Incoming Data Subscriber: %@", Flight.logDesc(self), name, String(describing: subscriber))
             
             let downstream = DownstreamSubcription(downstream: subscriber, parent: self)
             sync {

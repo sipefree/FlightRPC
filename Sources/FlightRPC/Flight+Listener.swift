@@ -65,7 +65,7 @@ extension FlightListener {
             on: port,
             name: name
         ) { (connection) in
-            //os_log(.debug, log: Flight.listenerLog, "(%@) New Connection: 0x%x", name, Flight.logDesc(connection))
+            os_log(.debug, log: Flight.listenerLog, "(%@) New Connection: 0x%x", name, Flight.logDesc(connection))
             
             let proxy = Self.init(connection: connection, exporting: local)
             newConnection(proxy)
@@ -111,7 +111,7 @@ extension Flight {
             queue = DispatchQueue(label: "FlightRPC-Listener-\(name)")
             
             listener.stateUpdateHandler = { newState in
-                //os_log(.debug, log: Flight.listenerLog, "%@ (%@) State: %@", Flight.logDesc(self), name, String(describing: newState))
+                os_log(.debug, log: Flight.listenerLog, "%@ (%@) State: %@", Flight.logDesc(self), name, String(describing: newState))
             }
             listener.newConnectionHandler = newConnection
             listener.start(queue: queue)
