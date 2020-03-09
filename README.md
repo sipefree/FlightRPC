@@ -1,3 +1,7 @@
 # FlightRPC
 
-A description of this package.
+An RPC micro framework in Swift.
+
+**Not suitable for production use.**
+
+There is no documentation yet.
