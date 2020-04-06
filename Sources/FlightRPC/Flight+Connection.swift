@@ -132,7 +132,7 @@ extension Flight {
                 
                 if let error = error {
                     var shouldLog = true
-                    if let posixError = error as? POSIXError, posixError.code == .ECANCELED {
+                    if case .posix(.ECANCELED) = error {
                         shouldLog = false
                     }
                     if shouldLog {
@@ -153,11 +153,11 @@ extension Flight {
                 
                 guard let data = data, error == nil else {
                     var shouldLog = true
-                    if let posixError = error as? POSIXError, posixError.code == .ECANCELED {
+                    if case .posix(.ECANCELED) = error {
                         shouldLog = false
                     }
                     if shouldLog {
-                        Swift.print("RPC Error: \(error)")
+                        Swift.print("RPC Error: \(error!)")
                     }
                     return
                 }
