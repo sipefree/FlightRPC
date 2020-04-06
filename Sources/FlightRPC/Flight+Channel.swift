@@ -21,7 +21,7 @@ extension Flight {
             self.connection = connection
             self.name = name
             
-            self.connectionStatePublisher = CurrentValueSubject(connection?.connectionStatePublisher.value ?? .preparing)
+            self.connectionStatePublisher = CurrentValueSubject(connection?.connectionStatePublisher.value ?? .setup)
             
             encodingQueue = DispatchQueue(
                 label: "FlightRPC-Encoding-\(name)",
