@@ -75,13 +75,22 @@ extension Flight {
                 outgoingDemand: false
             )
             
+            self.connectionStatePublisher = CurrentValueSubject(connection.state)
+            
             connection.stateUpdateHandler = { [weak self] state in
                 guard let self = self else { return }
+                self.connectionStatePublisher.send(state)
                 self.connectionStateChanged(to: state)
             }
             
             queue.setSpecific(key: Self.queueKey, value: queueContext)
         }
+        
+        
+        // MARK: - Public API
+        
+        /// A publisher for the connection state.
+        public var connectionStatePublisher: CurrentValueSubject<NWConnection.State, Never>
         
         
         // MARK: - Private API

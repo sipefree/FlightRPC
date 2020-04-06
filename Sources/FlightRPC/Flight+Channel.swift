@@ -21,6 +21,8 @@ extension Flight {
             self.connection = connection
             self.name = name
             
+            self.connectionStatePublisher = CurrentValueSubject(connection?.connectionStatePublisher.value ?? .preparing)
+            
             encodingQueue = DispatchQueue(
                 label: "FlightRPC-Encoding-\(name)",
                 qos: .userInitiated,
@@ -82,7 +84,11 @@ extension Flight {
                     }
                     .store(in: &cancellables)
                 
-                
+                connection.connectionStatePublisher
+                    .sink { [weak self] (state) in
+                        self?.connectionStatePublisher.send(state)
+                    }
+                    .store(in: &cancellables)
             }
             
         }
@@ -208,6 +214,8 @@ extension Flight {
             
             outgoingMessageSubject.send(outMsg)
         }
+        
+        public var connectionStatePublisher: CurrentValueSubject<NWConnection.State, Never>
 
     }
     
