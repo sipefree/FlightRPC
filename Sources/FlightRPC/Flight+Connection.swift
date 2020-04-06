@@ -131,7 +131,13 @@ extension Flight {
                 guard let self = self else { return }
                 
                 if let error = error {
-                    Swift.print("Error: \(error)")
+                    var shouldLog = true
+                    if let posixError = error as? POSIXError, posixError.code == .ECANCELED {
+                        shouldLog = false
+                    }
+                    if shouldLog {
+                        Swift.print("RPC Error: \(error)")
+                    }
                 }
                 
                 self.state.sending = false
@@ -146,8 +152,12 @@ extension Flight {
                 defer { self.state.receiving = false }
                 
                 guard let data = data, error == nil else {
-                    if let error = error {
-                        Swift.print("Receive error: \(error)")
+                    var shouldLog = true
+                    if let posixError = error as? POSIXError, posixError.code == .ECANCELED {
+                        shouldLog = false
+                    }
+                    if shouldLog {
+                        Swift.print("RPC Error: \(error)")
                     }
                     return
                 }
